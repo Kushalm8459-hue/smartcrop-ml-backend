@@ -1,0 +1,10 @@
+Set-Content -Path requirements.txt -Value @"
+fastapi
+uvicorn
+scikit-learn
+numpy
+pandas
+pydantic
+sqlalchemy
+python-multipart
+"@

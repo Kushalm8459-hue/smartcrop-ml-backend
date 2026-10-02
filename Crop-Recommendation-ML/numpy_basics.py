@@ -1,0 +1,11 @@
+import numpy as np
+numbers=np.array([10,20,30,40,50])
+data=np.array([[80,10,30],[12,45,87],[40,67,99]])
+print(data)
+print(numbers[2])
+print(data[0][2])
+print(data[2][1])
+print(data.shape)
+print(numbers)
+print(numbers+10)
+print(numbers+20)
