@@ -4,8 +4,86 @@ Fetches real-time weather (via Name or GPS Coordinates) and commodity market (Ma
 """
 
 from typing import Dict, Any, Optional
+import os
+import json
 import urllib.parse
 import requests
+
+
+def ask_smartcrop(message: str, history: list, crop_report: Optional[dict] = None) -> Dict[str, Any]:
+    """Ask the OpenAI Responses API for a plain-language, report-aware answer."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {"status": "not_configured", "message": "Add OPENAI_API_KEY to Crop-Recommendation-ML/.env and restart the server to enable the AI agronomy chat."}
+
+    context = "The user is a farmer using SmartCrop, a crop decision-support prototype. Explain terms in simple language and provide practical next steps. Do not claim a model score guarantees crop success, do not invent live weather, market prices, government rules, or local facts. Make clear when estimates need local confirmation. For pesticide, disease, chemical dosage, or high-stakes financial questions, recommend confirmation with a qualified local agriculture officer. Answer in the language the farmer uses."
+    if crop_report:
+        context += "\n\nCurrent crop report (project estimates, not guarantees):\n" + json.dumps(crop_report, ensure_ascii=False)[:12000]
+
+    conversation = [{"role": item.role, "content": item.content} for item in history[-10:]]
+    conversation.append({"role": "user", "content": message})
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra"),
+                "instructions": context,
+                "input": conversation,
+                "max_output_tokens": 700,
+                "store": False,
+            }, timeout=45,
+        )
+        if response.status_code in (401, 403):
+            return {"status": "error", "message": "The OpenAI API key is invalid or does not have access to this model. Check the server configuration."}
+        if response.status_code == 429:
+            return {"status": "error", "message": "The AI service is rate-limited or out of API credit. Please try again later."}
+        response.raise_for_status()
+        payload = response.json()
+        answer = payload.get("output_text")
+        if not answer:
+            answer = "\n".join(
+                part.get("text", "")
+                for item in payload.get("output", []) if item.get("type") == "message"
+                for part in item.get("content", []) if part.get("type") == "output_text"
+            ).strip()
+        if not answer:
+            return {"status": "error", "message": "The AI service returned an empty response. Please rephrase your question."}
+        return {"status": "success", "answer": answer, "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra")}
+    except requests.RequestException:
+        return {"status": "error", "message": "Could not connect to the AI service. Check the server's internet connection and try again."}
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "The AI service returned an unreadable response. Please try again."}
+
+
+def search_locations(query: str) -> Dict[str, Any]:
+    """Resolve an Indian place name and attach current weather when available."""
+    cleaned = query.strip()
+    if len(cleaned) < 2:
+        return {"status": "not_found", "message": "Enter at least two characters."}
+    try:
+        response = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": cleaned, "count": 5, "language": "en", "format": "json", "countryCode": "IN"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not results:
+            return {"status": "not_found", "query": cleaned, "results": []}
+        places = [{
+            "name": item.get("name", cleaned),
+            "district": item.get("admin2") or item.get("admin1", ""),
+            "state": item.get("admin1", "India"),
+            "country": item.get("country", "India"),
+            "latitude": item["latitude"],
+            "longitude": item["longitude"],
+        } for item in results]
+        first = places[0]
+        weather = fetch_weather_by_coordinates(first["latitude"], first["longitude"])
+        return {"status": "success", "query": cleaned, "results": places, "weather": weather}
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        return {"status": "unavailable", "query": cleaned, "message": "Location search is temporarily unavailable."}
 
 
 def fetch_live_weather(city_name: str) -> Dict[str, Any]:
@@ -22,13 +100,13 @@ def fetch_live_weather(city_name: str) -> Dict[str, Any]:
             f"https://geocoding-api.open-meteo.com/v1/search?"
             f"name={encoded_name}&count=1&language=en&format=json&countryCode=IN"
         )
-        geo_res = requests.get(geo_url, timeout=5).json()
+        geo_response = requests.get(geo_url, timeout=8)
+        geo_response.raise_for_status()
+        geo_res = geo_response.json()
 
         results = geo_res.get("results")
         if not results:
-            # Fallback coordinates (Nashik / Maharashtra)
-            lat, lon = 19.9975, 73.7898
-            resolved_place = cleaned_name
+            return {"status": "not_found", "city": cleaned_name, "message": "No matching Indian location was found."}
         else:
             lat = results[0]["latitude"]
             lon = results[0]["longitude"]
@@ -40,15 +118,15 @@ def fetch_live_weather(city_name: str) -> Dict[str, Any]:
             f"&current=temperature_2m,relative_humidity_2m,precipitation"
             f"&daily=precipitation_sum&timezone=auto"
         )
-        weather_res = requests.get(weather_url, timeout=5).json()
+        weather_response = requests.get(weather_url, timeout=8)
+        weather_response.raise_for_status()
+        weather_res = weather_response.json()
         current = weather_res.get("current", {})
 
         temp = current.get("temperature_2m", 25.0)
         humidity = current.get("relative_humidity_2m", 70.0)
 
-        # Estimate rainfall baseline from precipitation sum
-        daily_precip = weather_res.get("daily", {}).get("precipitation_sum", [150.0])[0]
-        estimated_rainfall = max(float(daily_precip) * 30.0, 100.0)
+        forecast_rainfall = weather_res.get("daily", {}).get("precipitation_sum", [])
 
         return {
             "status": "success",
@@ -57,18 +135,18 @@ def fetch_live_weather(city_name: str) -> Dict[str, Any]:
             "longitude": lon,
             "temperature": round(float(temp), 2),
             "humidity": round(float(humidity), 2),
-            "rainfall": round(float(estimated_rainfall), 2)
+            "forecast_rainfall_7_day_mm": round(sum(float(value or 0) for value in forecast_rainfall[:7]), 2),
+            "weather_source": "Open-Meteo",
+            "weather_observed_at": current.get("time"),
         }
-    except Exception as e:
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         return {
             "status": "fallback",
             "city": cleaned_name,
-            "latitude": 19.9975,
-            "longitude": 73.7898,
-            "temperature": 26.5,
-            "humidity": 68.0,
-            "rainfall": 180.0,
-            "error": str(e)
+            "temperature": None,
+            "humidity": None,
+            "forecast_rainfall_7_day_mm": None,
+            "message": "Live weather is temporarily unavailable. Please try again later."
         }
 
 
@@ -81,7 +159,9 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
         # 1. Reverse geocode to get the exact village/taluka/district
         geo_rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
         headers = {"User-Agent": "SmartCropAI-CollegeProject/1.0"}
-        rev_res = requests.get(geo_rev_url, headers=headers, timeout=5).json()
+        rev_response = requests.get(geo_rev_url, headers=headers, timeout=8)
+        rev_response.raise_for_status()
+        rev_res = rev_response.json()
 
         address = rev_res.get("address", {})
         village = (
@@ -100,13 +180,14 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
             f"&current=temperature_2m,relative_humidity_2m,precipitation"
             f"&daily=precipitation_sum&timezone=auto"
         )
-        weather_res = requests.get(weather_url, timeout=5).json()
+        weather_response = requests.get(weather_url, timeout=8)
+        weather_response.raise_for_status()
+        weather_res = weather_response.json()
         current = weather_res.get("current", {})
 
         temperature = current.get("temperature_2m", 27.0)
         humidity = current.get("relative_humidity_2m", 65.0)
-        daily_precip = weather_res.get("daily", {}).get("precipitation_sum", [120.0])[0]
-        estimated_rainfall = max(float(daily_precip) * 30.0, 110.0)
+        forecast_rainfall = weather_res.get("daily", {}).get("precipitation_sum", [])
 
         return {
             "status": "success",
@@ -117,7 +198,9 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
             "state": state,
             "temperature": round(float(temperature), 2),
             "humidity": round(float(humidity), 2),
-            "rainfall": round(float(estimated_rainfall), 2)
+            "forecast_rainfall_7_day_mm": round(sum(float(value or 0) for value in forecast_rainfall[:7]), 2),
+            "weather_source": "Open-Meteo",
+            "weather_observed_at": current.get("time"),
         }
     except Exception as exc:
         return {
@@ -125,48 +208,54 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
             "latitude": lat,
             "longitude": lon,
             "location_name": f"Coordinates ({lat}, {lon})",
-            "temperature": 27.0,
-            "humidity": 65.0,
-            "rainfall": 150.0,
-            "error": str(exc)
+            "temperature": None,
+            "humidity": None,
+            "forecast_rainfall_7_day_mm": None,
+            "message": "Live weather is temporarily unavailable. Please try again later."
         }
 
 
 def fetch_live_mandi_rates(crop_name: str, state: str = "Maharashtra") -> Dict[str, Any]:
-    """
-    Provides real-time/latest wholesale Mandi benchmark prices (INR per Quintal).
-    """
-    mandi_benchmarks = {
-        "rice": {"modal_price_quintal": 2203, "trend": "Stable", "primary_market": "Nashik APMC"},
-        "maize": {"modal_price_quintal": 2090, "trend": "Bullish", "primary_market": "Lasalgaon Mandi"},
-        "cotton": {"modal_price_quintal": 7020, "trend": "High Demand", "primary_market": "Jalgaon APMC"},
-        "soybean": {"modal_price_quintal": 4892, "trend": "Fluctuating", "primary_market": "Latur APMC"},
-        "chickpea": {"modal_price_quintal": 5440, "trend": "Stable", "primary_market": "Akola APMC"},
-        "mungbean": {"modal_price_quintal": 8558, "trend": "Bullish", "primary_market": "Nagpur APMC"},
-        "blackgram": {"modal_price_quintal": 6950, "trend": "Stable", "primary_market": "Ahmednagar APMC"},
-        "pigeonpeas": {"modal_price_quintal": 7000, "trend": "High Demand", "primary_market": "Amravati APMC"},
-        "grapes": {"modal_price_quintal": 6500, "trend": "Export Driven", "primary_market": "Nashik APMC"},
-        "banana": {"modal_price_quintal": 1800, "trend": "Stable", "primary_market": "Jalgaon APMC"},
-        "mango": {"modal_price_quintal": 5500, "trend": "Seasonal", "primary_market": "Ratnagiri APMC"},
-        "watermelon": {"modal_price_quintal": 1200, "trend": "Steady", "primary_market": "Pune APMC"},
-        "apple": {"modal_price_quintal": 8000, "trend": "Import Competition", "primary_market": "Vashi APMC"},
-        "orange": {"modal_price_quintal": 4500, "trend": "Strong", "primary_market": "Nagpur Mandi"},
-        "papaya": {"modal_price_quintal": 2100, "trend": "Moderate", "primary_market": "Nandurbar APMC"},
-        "coffee": {"modal_price_quintal": 12500, "trend": "Bullish", "primary_market": "Chikmagalur APMC"}
+    """Fetch today's official AGMARKNET-derived price records through data.gov.in."""
+    api_key = os.environ.get("DATA_GOV_IN_API_KEY")
+    aliases = {
+        "chickpea": "Gram", "kidneybeans": "Kidney Beans", "pigeonpeas": "Arhar (Tur/Red Gram)",
+        "mungbean": "Moong (Green Gram)", "blackgram": "Urad", "mothbeans": "Moth",
+        "lentil": "Lentil (Masur)", "maize": "Maize", "rice": "Paddy(Dhan)",
+        "cotton": "Cotton", "jute": "Jute", "coffee": "Coffee", "banana": "Banana",
+        "mango": "Mango", "grapes": "Grapes", "orange": "Orange", "coconut": "Coconut",
+        "muskmelon": "Muskmelon", "papaya": "Papaya", "pomegranate": "Pomegranate",
+        "watermelon": "Watermelon", "apple": "Apple",
     }
-
-    key = crop_name.lower().strip()
-    data = mandi_benchmarks.get(key, {
-        "modal_price_quintal": 3200,
-        "trend": "Normal",
-        "primary_market": f"{state} Regional APMC"
-    })
-
-    return {
-        "crop": crop_name,
-        "state": state,
-        "modal_price_per_quintal": data["modal_price_quintal"],
-        "price_per_kg": round(data["modal_price_quintal"] / 100.0, 2),
-        "market_trend": data["trend"],
-        "reference_mandi": data["primary_market"]
-    }
+    commodity = aliases.get(crop_name.lower().strip(), crop_name.strip())
+    if not api_key:
+        return {
+            "crop": crop_name, "state": state, "data_status": "unavailable",
+            "message": "Live mandi data needs a data.gov.in API key. Configure DATA_GOV_IN_API_KEY to enable today's market prices.",
+        }
+    try:
+        response = requests.get(
+            "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070",
+            params={
+                "api-key": api_key, "format": "json", "limit": 100,
+                "filters[commodity]": commodity, "filters[state]": state,
+                "sort[arrival_date]": "desc",
+            }, timeout=10,
+        )
+        response.raise_for_status()
+        records = response.json().get("records", [])
+        if records:
+            record = records[0]
+            modal = float(record["modal_price"])
+            return {
+                "crop": crop_name, "commodity": record.get("commodity", commodity),
+                "state": record.get("state", state), "district": record.get("district"),
+                "market": record.get("market"), "arrival_date": record.get("arrival_date"),
+                "min_price_per_quintal": float(record["min_price"]),
+                "max_price_per_quintal": float(record["max_price"]),
+                "modal_price_per_quintal": modal, "price_per_kg": round(modal / 100, 2),
+                "data_status": "live", "data_source": "AGMARKNET via data.gov.in",
+            }
+        return {"crop": crop_name, "state": state, "data_status": "no_records", "message": f"No recent official market record found for {commodity} in {state}."}
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        return {"crop": crop_name, "state": state, "data_status": "unavailable", "message": "The official mandi feed is temporarily unavailable. Try again later."}

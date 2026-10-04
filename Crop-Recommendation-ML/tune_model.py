@@ -33,7 +33,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 # Dictionary to hold the best estimators and their test scores
-model_results = {}
+model_results = {}  # Pick a model using training-fold CV, never hold-out accuracy.
 
 # ------------------------------------------------
 # RANDOM FOREST
@@ -49,9 +49,8 @@ rf_search = GridSearchCV(rf, rf_params, cv=cv, scoring="accuracy", n_jobs=-1, ve
 rf_search.fit(X_train, y_train)
 
 rf_best = rf_search.best_estimator_
-rf_test_acc = rf_best.score(X_test, y_test)
-model_results["Random Forest"] = (rf_best, rf_test_acc)
-print(f"Random Forest Best CV Score: {rf_search.best_score_:.4f} | Test Acc: {rf_test_acc:.4f}")
+model_results["Random Forest"] = (rf_best, rf_search.best_score_)
+print(f"Random Forest Best CV Score: {rf_search.best_score_:.4f}")
 
 # ------------------------------------------------
 # SVM (with probability=True for Top-3 predictions)
@@ -70,9 +69,8 @@ svm_search = GridSearchCV(svm_pipeline, svm_params, cv=cv, scoring="accuracy", n
 svm_search.fit(X_train, y_train)
 
 svm_best = svm_search.best_estimator_
-svm_test_acc = svm_best.score(X_test, y_test)
-model_results["SVM"] = (svm_best, svm_test_acc)
-print(f"SVM Best CV Score: {svm_search.best_score_:.4f} | Test Acc: {svm_test_acc:.4f}")
+model_results["SVM"] = (svm_best, svm_search.best_score_)
+print(f"SVM Best CV Score: {svm_search.best_score_:.4f}")
 
 # ------------------------------------------------
 # GRADIENT BOOSTING
@@ -88,18 +86,19 @@ gb_search = GridSearchCV(gb, gb_params, cv=cv, scoring="accuracy", n_jobs=-1, ve
 gb_search.fit(X_train, y_train)
 
 gb_best = gb_search.best_estimator_
-gb_test_acc = gb_best.score(X_test, y_test)
-model_results["Gradient Boosting"] = (gb_best, gb_test_acc)
-print(f"Gradient Boosting Best CV Score: {gb_search.best_score_:.4f} | Test Acc: {gb_test_acc:.4f}")
+model_results["Gradient Boosting"] = (gb_best, gb_search.best_score_)
+print(f"Gradient Boosting Best CV Score: {gb_search.best_score_:.4f}")
 
 # ------------------------------------------------
 # SELECT & SAVE THE BEST MODEL
 # ------------------------------------------------
 best_name = max(model_results, key=lambda k: model_results[k][1])
-best_estimator, best_acc = model_results[best_name]
+best_estimator, best_cv_score = model_results[best_name]
+holdout_accuracy = best_estimator.score(X_test, y_test)
 
 print("\n====================================")
-print(f"WINNER: {best_name} with {best_acc * 100:.2f}% accuracy")
+print(f"WINNER: {best_name} (training-fold CV accuracy: {best_cv_score * 100:.2f}%)")
+print(f"One-time held-out test accuracy: {holdout_accuracy * 100:.2f}%")
 print("====================================")
 
 MODEL_PATH = BASE_DIR / "crop_model.pkl"

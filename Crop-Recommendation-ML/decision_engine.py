@@ -63,9 +63,9 @@ def generate_rationales(crop_name, suitability, total_cost, budget, water_defici
 
     # Agronomic match
     if suitability >= 80:
-        pros.append(f"Highly compatible with your soil chemistry and temperature ({suitability:.1f}% ML confidence).")
+        pros.append(f"The crop model ranked this soil and climate combination highly ({suitability:.1f} similarity score).")
     else:
-        pros.append(f"Acceptable agronomical fit ({suitability:.1f}% ML confidence).")
+        pros.append(f"The crop model gives this soil and climate combination a {suitability:.1f} similarity score.")
 
     # Financial viability
     if total_cost <= budget:
@@ -143,6 +143,7 @@ def evaluate_crop_plan(soil_inputs, farm_profile):
     acres = float(farm_profile.get("acres", 1.0))
     budget = float(farm_profile.get("budget", 50000.0))
     rainfall_mm = float(soil_inputs.get("rainfall", 0.0))
+    seasonal_rainfall_mm = float(farm_profile.get("seasonal_rainfall_mm", rainfall_mm))
 
     results = []
 
@@ -160,7 +161,7 @@ def evaluate_crop_plan(soil_inputs, farm_profile):
         net_profit_est = round(base_revenue - total_cost)
 
         # 2. Water
-        water_data = compute_water_balance(crop_info, acres, rainfall_mm)
+        water_data = compute_water_balance(crop_info, acres, seasonal_rainfall_mm)
 
         # 3. Risk Levels
         cost_risk = "HIGH" if total_cost > budget else ("MEDIUM" if total_cost > (0.85 * budget) else "LOW")
@@ -182,7 +183,7 @@ def evaluate_crop_plan(soil_inputs, farm_profile):
         )
 
         # 6. Scenarios
-        scenarios = run_scenario_testing(crop_info, acres, total_cost, rainfall_mm)
+        scenarios = run_scenario_testing(crop_info, acres, total_cost, seasonal_rainfall_mm)
 
         results.append({
             "rank": rank,

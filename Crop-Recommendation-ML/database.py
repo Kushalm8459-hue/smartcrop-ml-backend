@@ -4,10 +4,14 @@ Uses SQLite + SQLAlchemy to manage farmer authentication and annual farm profile
 """
 
 from pathlib import Path
-from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, UniqueConstraint
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import hashlib
+import hmac
+import os
+import secrets
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from passlib.context import CryptContext
 import jwt
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,8 +21,7 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = "SMARTCROP_PRODUCTION_SECRET_KEY_CHANGE_IN_ENV"
+SECRET_KEY = os.environ.get("SMARTCROP_SECRET_KEY", "smartcrop-local-development-key-change-before-deployment")
 ALGORITHM = "HS256"
 
 
@@ -51,6 +54,7 @@ class AnnualFarmProfile(Base):
     acres = Column(Float, nullable=False)
     budget = Column(Float, nullable=False)
     irrigation_source = Column(String, nullable=False)
+    location = Column(String, nullable=False, default="Maharashtra, India")
 
     # Soil Chemistry
     n = Column(Float, nullable=False)
@@ -62,6 +66,7 @@ class AnnualFarmProfile(Base):
     temperature = Column(Float, nullable=False)
     humidity = Column(Float, nullable=False)
     rainfall = Column(Float, nullable=False)
+    seasonal_rainfall_mm = Column(Float, nullable=False, default=0)
 
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -70,6 +75,15 @@ class AnnualFarmProfile(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
+# Add the location field to databases created by earlier project versions.
+with engine.begin() as connection:
+    columns = {row["name"] for row in connection.execute(text("PRAGMA table_info(annual_farm_profiles)" )).mappings()}
+    if "location" not in columns:
+        connection.execute(text("ALTER TABLE annual_farm_profiles ADD COLUMN location VARCHAR NOT NULL DEFAULT 'Maharashtra, India'"))
+    if "seasonal_rainfall_mm" not in columns:
+        connection.execute(text("ALTER TABLE annual_farm_profiles ADD COLUMN seasonal_rainfall_mm FLOAT NOT NULL DEFAULT 0"))
+        connection.execute(text("UPDATE annual_farm_profiles SET seasonal_rainfall_mm = rainfall"))
 
 
 # ------------------------------------------------
@@ -84,13 +98,35 @@ def get_db():
         db.close()
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    salt = secrets.token_bytes(16)
+    cost, block_size, parallelism = 2**14, 8, 1
+    digest = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=cost, r=block_size,
+        p=parallelism, dklen=32,
+    )
+    return f"scrypt${cost}${block_size}${parallelism}${salt.hex()}${digest.hex()}"
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    if hashed_password.startswith("scrypt$"):
+        try:
+            _, cost, block_size, parallelism, salt_hex, digest_hex = hashed_password.split("$", 5)
+            actual = hashlib.scrypt(
+                plain_password.encode("utf-8"), salt=bytes.fromhex(salt_hex),
+                n=int(cost), r=int(block_size), p=int(parallelism), dklen=32,
+            )
+            return hmac.compare_digest(actual.hex(), digest_hex)
+        except (ValueError, TypeError):
+            return False
+    # Existing accounts used Passlib bcrypt. Verify their stored hashes directly
+    # so they continue working with current bcrypt releases, including bcrypt 5.
+    try:
+        return bcrypt.checkpw(plain_password.encode("utf-8")[:72], hashed_password.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
+    to_encode["exp"] = datetime.now(timezone.utc) + timedelta(days=7)
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def decode_access_token(token: str) -> dict:
