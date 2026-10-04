@@ -19,6 +19,8 @@ python -m uvicorn main_api:app --reload
 
 Open <http://127.0.0.1:8000/> for the farmer app and <http://127.0.0.1:8000/docs> for the API reference. The app serves the API and frontend from one origin. SQLite creates `smartcrop.db` beside the backend files.
 
+Farmer accounts and farm records persist in the configured database. Local development uses this SQLite file. For deployment, set `SMARTCROP_DATABASE_URL` (or the hosting provider's `DATABASE_URL`) to a managed PostgreSQL database, or mount persistent storage and set `SMARTCROP_DATA_DIR` to its path. Keep `SMARTCROP_SECRET_KEY` stable between deploys so current sessions remain valid. A GitHub push by itself cannot provide durable server storage; the host must provide the database or persistent disk.
+
 To run with your existing repository-level virtual environment, activate `..\venv\Scripts\Activate.ps1` instead. Install this folder's `requirements.txt` into that environment first.
 
 ## Included flows

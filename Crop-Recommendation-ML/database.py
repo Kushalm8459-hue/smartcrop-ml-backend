@@ -10,14 +10,23 @@ import hashlib
 import hmac
 import os
 import secrets
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, UniqueConstraint, text
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, UniqueConstraint, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 import jwt
 
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE_URL = f"sqlite:///{BASE_DIR / 'smartcrop.db'}"
+DATA_DIR = Path(os.environ.get("SMARTCROP_DATA_DIR") or BASE_DIR).expanduser().resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.environ.get("SMARTCROP_DATABASE_URL") or os.environ.get("DATABASE_URL") or f"sqlite:///{DATA_DIR / 'smartcrop.db'}"
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL.removeprefix("postgres://")
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL.removeprefix("postgresql://")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine_options = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite:"):
+    engine_options["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, **engine_options)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -132,7 +141,7 @@ Base.metadata.create_all(bind=engine)
 
 # Add the location field to databases created by earlier project versions.
 with engine.begin() as connection:
-    columns = {row["name"] for row in connection.execute(text("PRAGMA table_info(annual_farm_profiles)" )).mappings()}
+    columns = {column["name"] for column in inspect(connection).get_columns("annual_farm_profiles")}
     if "location" not in columns:
         connection.execute(text("ALTER TABLE annual_farm_profiles ADD COLUMN location VARCHAR NOT NULL DEFAULT 'Maharashtra, India'"))
     if "seasonal_rainfall_mm" not in columns:
