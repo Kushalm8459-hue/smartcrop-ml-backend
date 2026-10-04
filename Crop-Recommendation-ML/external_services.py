@@ -311,6 +311,65 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
         }
 
 
+_KEYLESS_MANDI_API = "https://mandi-api.onrender.com/v1/prices"
+_KEYLESS_MANDI_SOURCE = "Community Mandi API (data.gov.in-sourced; may be delayed)"
+
+
+def _fetch_keyless_mandi_records(crop_name: str, state: str) -> list[dict]:
+    """Use the public community mirror when the official data.gov.in key is absent."""
+    response = requests.get(
+        _KEYLESS_MANDI_API,
+        params={"state": state, "commodity": crop_name},
+        headers={"Accept": "application/json", "User-Agent": "SmartCrop-Farm-Decision-Support/1.0"},
+        timeout=8,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("success") or not isinstance(payload.get("data"), list):
+        return []
+    records = []
+    for row in payload["data"]:
+        try:
+            date_text = str(row.get("arrival_date") or "")
+            date_value = datetime.fromisoformat(date_text[:10])
+            records.append({
+                "market": str(row.get("market") or "Unknown market").strip(),
+                "district": str(row.get("district") or "").strip(),
+                "arrival_date": date_text,
+                "min_price_per_quintal": float(row["min_price"]),
+                "max_price_per_quintal": float(row["max_price"]),
+                "modal_price_per_quintal": float(row["modal_price"]),
+                "_date": date_value,
+            })
+        except (ValueError, KeyError, TypeError):
+            continue
+    return records
+
+
+def _keyless_mandi_fallback(crop_name: str, state: str) -> Dict[str, Any]:
+    try:
+        records = _fetch_keyless_mandi_records(crop_name, state)
+        records.sort(key=lambda row: row["_date"], reverse=True)
+        for row in records:
+            row.pop("_date", None)
+        if not records:
+            return {
+                "crop": crop_name, "state": state, "data_status": "no_records",
+                "message": (f"No recent mandi record for {crop_name} was found in {state}. "
+                            "The keyless feed currently covers Maharashtra, Uttar Pradesh, Punjab, Madhya Pradesh and Karnataka."),
+            }
+        return {
+            "crop": crop_name, "commodity": crop_name, "state": state,
+            **records[0], "price_per_kg": round(records[0]["modal_price_per_quintal"] / 100, 2),
+            "data_status": "live", "data_source": _KEYLESS_MANDI_SOURCE,
+        }
+    except (requests.RequestException, ValueError, TypeError):
+        return {
+            "crop": crop_name, "state": state, "data_status": "unavailable",
+            "message": "The public mandi fallback is temporarily unavailable. Try again later or configure DATA_GOV_IN_API_KEY for the official feed.",
+        }
+
+
 def fetch_live_mandi_rates(crop_name: str, state: str = "Maharashtra") -> Dict[str, Any]:
     """Fetch today's official AGMARKNET-derived price records through data.gov.in."""
     api_key = os.environ.get("DATA_GOV_IN_API_KEY")
@@ -325,10 +384,8 @@ def fetch_live_mandi_rates(crop_name: str, state: str = "Maharashtra") -> Dict[s
     }
     commodity = aliases.get(crop_name.lower().strip(), crop_name.strip())
     if not api_key:
-        return {
-            "crop": crop_name, "state": state, "data_status": "unavailable",
-            "message": "Live mandi data needs a data.gov.in API key. Configure DATA_GOV_IN_API_KEY to enable today's market prices.",
-        }
+        fallback_name = crop_name.strip()
+        return _keyless_mandi_fallback(fallback_name, state)
     try:
         response = requests.get(
             "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070",
@@ -352,9 +409,9 @@ def fetch_live_mandi_rates(crop_name: str, state: str = "Maharashtra") -> Dict[s
                 "modal_price_per_quintal": modal, "price_per_kg": round(modal / 100, 2),
                 "data_status": "live", "data_source": "AGMARKNET via data.gov.in",
             }
-        return {"crop": crop_name, "state": state, "data_status": "no_records", "message": f"No recent official market record found for {commodity} in {state}."}
+        return _keyless_mandi_fallback(crop_name.strip(), state)
     except (requests.RequestException, ValueError, KeyError, TypeError):
-        return {"crop": crop_name, "state": state, "data_status": "unavailable", "message": "The official mandi feed is temporarily unavailable. Try again later."}
+        return _keyless_mandi_fallback(crop_name.strip(), state)
 
 
 def fetch_market_comparison(crop_name: str, state: str = "Maharashtra") -> Dict[str, Any]:
@@ -371,8 +428,7 @@ def fetch_market_comparison(crop_name: str, state: str = "Maharashtra") -> Dict[
     }
     commodity = aliases.get(crop_name.lower().strip(), crop_name.strip())
     if not api_key:
-        return {"status": "unavailable", "crop": crop_name, "state": state,
-                "message": "Market comparison needs DATA_GOV_IN_API_KEY on the server."}
+        return _keyless_market_comparison(crop_name.strip(), state)
     try:
         response = requests.get(
             "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070",
@@ -408,11 +464,39 @@ def fetch_market_comparison(crop_name: str, state: str = "Maharashtra") -> Dict[
                 continue
         markets = [item for _, item in latest_by_market.values()]
         markets.sort(key=lambda item: item["modal_price_per_quintal"], reverse=True)
+        if not markets:
+            return _keyless_market_comparison(crop_name.strip(), state)
         return {"status": "live" if markets else "no_records", "crop": crop_name,
                 "commodity": commodity, "state": state, "markets": markets[:25],
                 "highest_reported": markets[0] if markets else None,
                 "data_source": "AGMARKNET via data.gov.in",
                 "message": "Reported wholesale rates only; these are not confirmed buyer offers."}
     except (requests.RequestException, ValueError, TypeError):
+        return _keyless_market_comparison(crop_name.strip(), state)
+
+
+def _keyless_market_comparison(crop_name: str, state: str) -> Dict[str, Any]:
+    try:
+        records = _fetch_keyless_mandi_records(crop_name, state)
+        latest_by_market = {}
+        for item in records:
+            key = (item["market"].casefold(), item["district"].casefold())
+            if key not in latest_by_market or item["_date"] > latest_by_market[key][0]:
+                latest_by_market[key] = (item["_date"], item)
+        markets = []
+        for _, item in latest_by_market.values():
+            item.pop("_date", None)
+            markets.append(item)
+        markets.sort(key=lambda item: item["modal_price_per_quintal"], reverse=True)
+        return {
+            "status": "live" if markets else "no_records", "crop": crop_name,
+            "commodity": crop_name, "state": state, "markets": markets[:25],
+            "highest_reported": markets[0] if markets else None,
+            "data_source": _KEYLESS_MANDI_SOURCE,
+            "message": ("Reported wholesale rates only; these are not confirmed buyer offers."
+                        if markets else f"No recent mandi records for {crop_name} in {state} were found in the public feed."),
+        }
+    except (requests.RequestException, ValueError, TypeError):
         return {"status": "unavailable", "crop": crop_name, "state": state,
-                "message": "The official mandi comparison feed is temporarily unavailable."}
+                "markets": [], "highest_reported": None,
+                "message": "The public mandi fallback is temporarily unavailable. Try again later."}

@@ -571,8 +571,9 @@ def services_status(farmer: Farmer = Depends(get_current_farmer)):
     return {
         "mandi": {
             "configured": bool(os.environ.get("DATA_GOV_IN_API_KEY")),
+            "fallback_available": True,
             "provider": "AGMARKNET via data.gov.in",
-            "setup": "Set DATA_GOV_IN_API_KEY in the backend .env or hosting environment.",
+            "setup": "Official data.gov.in key not set; SmartCrop will try its keyless public mandi fallback. It has limited state coverage and reported prices can be delayed.",
         },
         "crop_health": {
             "configured": bool(os.environ.get("OPENAI_API_KEY")),
