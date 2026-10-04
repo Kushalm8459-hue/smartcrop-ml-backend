@@ -1,12 +1,14 @@
 """SmartCrop API: farmer accounts, crop recommendations and farm services."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
+import uuid
 from typing import Optional
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -16,13 +18,13 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).with_name(".env"))
 
 from database import (
-    AnnualFarmProfile, Farmer, create_access_token, decode_access_token,
+    AnnualFarmProfile, Farmer, FarmDocument, create_access_token, decode_access_token,
     get_db, hash_password, verify_password,
 )
 from decision_engine import evaluate_crop_plan
 from external_services import (
     ask_smartcrop,
-    fetch_live_mandi_rates, fetch_live_weather, fetch_weather_by_coordinates,
+    fetch_crop_image, fetch_live_mandi_rates, fetch_live_weather, fetch_weather_by_coordinates,
     search_locations,
 )
 
@@ -31,6 +33,15 @@ app = FastAPI(
     description="Farmer accounts, field profiles, crop decision support, weather and mandi benchmarks.",
     version="2.2.0",
 )
+UPLOAD_DIR = Path(__file__).with_name("uploads")
+MAX_SOIL_REPORT_BYTES = 10 * 1024 * 1024
+MAX_FARM_PHOTO_BYTES = 8 * 1024 * 1024
+ALLOWED_UPLOAD_TYPES = {
+    "application/pdf": (".pdf", b"%PDF-"),
+    "image/jpeg": (".jpg", b"\xff\xd8\xff"),
+    "image/png": (".png", b"\x89PNG\r\n\x1a\n"),
+    "image/webp": (".webp", b"RIFF"),
+}
 allowed_origins = [origin.strip() for origin in os.getenv("SMARTCROP_ALLOWED_ORIGINS", "").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -53,7 +64,7 @@ class SoilClimateData(BaseModel):
 
 class FarmProfileData(BaseModel):
     acres: float = Field(default=1.0, gt=0, le=100000)
-    budget: float = Field(default=50000.0, gt=0)
+    budget: float = Field(default=50000.0, ge=20000)
     irrigation_source: str = Field(default="Canal", min_length=2, max_length=80)
     location: str = Field(default="Maharashtra, India", min_length=2, max_length=160)
     seasonal_rainfall_mm: Optional[float] = Field(default=None, ge=0, le=2000)
@@ -122,7 +133,7 @@ class ChatRequest(BaseModel):
 class AnnualProfilePayload(SoilClimateData):
     year: int = Field(default_factory=lambda: datetime.now().year, ge=2000, le=2200)
     acres: float = Field(..., gt=0, le=100000)
-    budget: float = Field(..., gt=0)
+    budget: float = Field(..., ge=20000)
     irrigation_source: str = Field(..., min_length=2, max_length=80)
     location: str = Field(..., min_length=2, max_length=160)
     seasonal_rainfall_mm: Optional[float] = Field(default=None, ge=0, le=2000)
@@ -145,6 +156,19 @@ def profile_public(profile: AnnualFarmProfile) -> dict:
         "N": profile.n, "P": profile.p, "K": profile.k, "ph": profile.ph,
         "temperature": profile.temperature, "humidity": profile.humidity,
         "rainfall": profile.rainfall, "seasonal_rainfall_mm": profile.seasonal_rainfall_mm,
+    }
+
+
+def document_public(document: FarmDocument) -> dict:
+    return {
+        "id": document.id,
+        "year": document.year,
+        "kind": document.kind,
+        "name": document.original_name,
+        "media_type": document.media_type,
+        "size_bytes": document.file_size,
+        "created_at": document.created_at.isoformat(),
+        "download_url": f"/api/v1/farmer/documents/{document.id}/file",
     }
 
 
@@ -305,6 +329,114 @@ def recommend_for_farmer(
     }
 
 
+@app.post("/api/v1/farmer/profile/documents")
+async def upload_farm_documents(
+    year: int = Form(..., ge=2000, le=2200),
+    soil_report: Optional[UploadFile] = File(default=None),
+    farm_photos: list[UploadFile] = File(default=[]),
+    farmer: Farmer = Depends(get_current_farmer),
+    db: Session = Depends(get_db),
+):
+    """Save private soil reports and field photos against an existing yearly farm profile."""
+    if len(farm_photos) > 5:
+        raise HTTPException(status_code=413, detail="Choose up to five farm photos at a time.")
+    profile = db.query(AnnualFarmProfile).filter(
+        AnnualFarmProfile.farmer_id == farmer.id, AnnualFarmProfile.year == year,
+    ).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Save your farm details before uploading documents.")
+    pending = []
+    if soil_report and soil_report.filename:
+        pending.append((soil_report, "soil_report", MAX_SOIL_REPORT_BYTES))
+    pending.extend((photo, "farm_photo", MAX_FARM_PHOTO_BYTES) for photo in farm_photos if photo.filename)
+    if not pending:
+        raise HTTPException(status_code=400, detail="Choose a soil report or at least one farm photo to upload.")
+
+    farmer_dir = UPLOAD_DIR / str(farmer.id)
+    farmer_dir.mkdir(parents=True, exist_ok=True)
+    created_files = []
+    created_records = []
+    try:
+        for upload, kind, max_bytes in pending:
+            details = ALLOWED_UPLOAD_TYPES.get(upload.content_type or "")
+            if details is None:
+                raise HTTPException(status_code=415, detail="Use a PDF, JPG, PNG, or WEBP soil report/photo.")
+            extension, signature = details
+            prefix = await upload.read(16)
+            await upload.seek(0)
+            valid_signature = prefix.startswith(signature)
+            if upload.content_type == "image/webp":
+                valid_signature = valid_signature and prefix[8:12] == b"WEBP"
+            if not valid_signature:
+                raise HTTPException(status_code=415, detail="One of the selected files does not match its file type.")
+
+            stored_name = f"{uuid.uuid4().hex}{extension}"
+            destination = farmer_dir / stored_name
+            created_files.append(destination)
+            size = 0
+            with destination.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"{kind.replace('_', ' ').title()} files must be under {max_bytes // (1024 * 1024)} MB.",
+                        )
+                    output.write(chunk)
+            if size == 0:
+                destination.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail="Empty files cannot be uploaded.")
+            safe_name = Path(upload.filename or f"{kind}{extension}").name[:180]
+            created_records.append(FarmDocument(
+                farmer_id=farmer.id, year=year, kind=kind, original_name=safe_name,
+                media_type=upload.content_type, stored_name=stored_name, file_size=size,
+            ))
+        db.add_all(created_records)
+        db.commit()
+        for record in created_records:
+            db.refresh(record)
+        return {"success": True, "documents": [document_public(record) for record in created_records]}
+    except Exception:
+        db.rollback()
+        for path in created_files:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        if soil_report:
+            await soil_report.close()
+        for photo in farm_photos:
+            await photo.close()
+
+
+@app.get("/api/v1/farmer/profile/documents")
+def list_farm_documents(
+    year: int = Query(..., ge=2000, le=2200),
+    farmer: Farmer = Depends(get_current_farmer),
+    db: Session = Depends(get_db),
+):
+    documents = db.query(FarmDocument).filter(
+        FarmDocument.farmer_id == farmer.id, FarmDocument.year == year,
+    ).order_by(FarmDocument.created_at.desc()).all()
+    return {"documents": [document_public(document) for document in documents]}
+
+
+@app.get("/api/v1/farmer/documents/{document_id}/file")
+def download_farm_document(
+    document_id: int,
+    farmer: Farmer = Depends(get_current_farmer),
+    db: Session = Depends(get_db),
+):
+    document = db.query(FarmDocument).filter(
+        FarmDocument.id == document_id, FarmDocument.farmer_id == farmer.id,
+    ).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Farm document was not found.")
+    path = UPLOAD_DIR / str(farmer.id) / document.stored_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This file is no longer available on the server.")
+    return FileResponse(path, media_type=document.media_type, filename=document.original_name)
+
+
 @app.get("/api/v1/services/search-location")
 def search_location(query: str = Query(..., min_length=2, max_length=120)):
     return search_locations(query)
@@ -327,3 +459,8 @@ def get_mandi_rate(
     state: str = Query(default="Maharashtra", min_length=2, max_length=100),
 ):
     return fetch_live_mandi_rates(crop, state)
+
+
+@app.get("/api/v1/services/crop-image")
+def crop_image(crop: str = Query(..., min_length=2, max_length=80)):
+    return fetch_crop_image(crop)

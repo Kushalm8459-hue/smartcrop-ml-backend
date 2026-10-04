@@ -4,10 +4,49 @@ Fetches real-time weather (via Name or GPS Coordinates) and commodity market (Ma
 """
 
 from typing import Dict, Any, Optional
+from functools import lru_cache
 import os
 import json
+import re
 import urllib.parse
 import requests
+
+
+@lru_cache(maxsize=256)
+def fetch_crop_image(crop_name: str) -> Dict[str, Any]:
+    """Find a crop photo on Wikimedia Commons and return image-credit details."""
+    query = f"{crop_name.strip()} crop plant field"
+    try:
+        response = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query", "format": "json", "generator": "search",
+                "gsrsearch": query, "gsrnamespace": 6, "gsrlimit": 8,
+                "prop": "imageinfo", "iiprop": "url|extmetadata", "iiurlwidth": 900,
+            },
+            headers={"User-Agent": "SmartCropCollegeProject/1.0 (crop recommendation demo)"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        pages = response.json().get("query", {}).get("pages", {})
+        for page in sorted(pages.values(), key=lambda item: item.get("index", 999)):
+            info = (page.get("imageinfo") or [{}])[0]
+            if not info.get("thumburl"):
+                continue
+            metadata = info.get("extmetadata", {})
+            def plain(key: str) -> str:
+                raw = metadata.get(key, {}).get("value", "")
+                return re.sub(r"<[^>]*>", " ", raw).replace("&nbsp;", " ").strip()[:240]
+            return {
+                "status": "success", "crop": crop_name,
+                "image_url": info["thumburl"],
+                "page_url": info.get("descriptionurl", "https://commons.wikimedia.org/"),
+                "creator": plain("Artist") or "Wikimedia Commons contributor",
+                "license": plain("LicenseShortName") or "See image page",
+            }
+        return {"status": "not_found", "crop": crop_name}
+    except (requests.RequestException, ValueError, TypeError):
+        return {"status": "unavailable", "crop": crop_name}
 
 
 def ask_smartcrop(message: str, history: list, crop_report: Optional[dict] = None) -> Dict[str, Any]:

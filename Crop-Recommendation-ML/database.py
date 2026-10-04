@@ -74,6 +74,21 @@ class AnnualFarmProfile(Base):
     __table_args__ = (UniqueConstraint("farmer_id", "year", name="uq_farmer_year"),)
 
 
+class FarmDocument(Base):
+    """Private soil reports and farm photos uploaded by a farmer."""
+    __tablename__ = "farm_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=False, index=True)
+    year = Column(Integer, nullable=False, index=True)
+    kind = Column(String, nullable=False)  # soil_report or farm_photo
+    original_name = Column(String, nullable=False)
+    media_type = Column(String, nullable=False)
+    stored_name = Column(String, unique=True, nullable=False)
+    file_size = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 Base.metadata.create_all(bind=engine)
 
 # Add the location field to databases created by earlier project versions.
