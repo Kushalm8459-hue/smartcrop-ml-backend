@@ -55,6 +55,7 @@ class AnnualFarmProfile(Base):
     budget = Column(Float, nullable=False)
     irrigation_source = Column(String, nullable=False)
     location = Column(String, nullable=False, default="Maharashtra, India")
+    soil_type = Column(String, nullable=False, default="Unknown")
 
     # Soil Chemistry
     n = Column(Float, nullable=False)
@@ -89,6 +90,44 @@ class FarmDocument(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class PastCropHistory(Base):
+    __tablename__ = "past_crop_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=False, index=True)
+    crop = Column(String, nullable=False)
+    year = Column(Integer, nullable=False)
+    season = Column(String, nullable=False)
+    area_acres = Column(Float, nullable=False)
+    yield_quintals = Column(Float, nullable=False)
+    notes = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class CommunityPost(Base):
+    __tablename__ = "community_posts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=False, index=True)
+    message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ProduceListing(Base):
+    __tablename__ = "produce_listings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=False, index=True)
+    crop = Column(String, nullable=False)
+    quantity_quintals = Column(Float, nullable=False)
+    asking_price_per_quintal = Column(Float, nullable=False)
+    location = Column(String, nullable=False)
+    notes = Column(String, nullable=False, default="")
+    share_phone = Column(Integer, nullable=False, default=0)
+    active = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 Base.metadata.create_all(bind=engine)
 
 # Add the location field to databases created by earlier project versions.
@@ -99,6 +138,8 @@ with engine.begin() as connection:
     if "seasonal_rainfall_mm" not in columns:
         connection.execute(text("ALTER TABLE annual_farm_profiles ADD COLUMN seasonal_rainfall_mm FLOAT NOT NULL DEFAULT 0"))
         connection.execute(text("UPDATE annual_farm_profiles SET seasonal_rainfall_mm = rainfall"))
+    if "soil_type" not in columns:
+        connection.execute(text("ALTER TABLE annual_farm_profiles ADD COLUMN soil_type VARCHAR NOT NULL DEFAULT 'Unknown'"))
 
 
 # ------------------------------------------------

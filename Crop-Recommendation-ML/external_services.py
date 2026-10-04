@@ -8,6 +8,8 @@ from functools import lru_cache
 import os
 import json
 import re
+import base64
+from datetime import datetime
 import urllib.parse
 import requests
 
@@ -93,6 +95,61 @@ def ask_smartcrop(message: str, history: list, crop_report: Optional[dict] = Non
         return {"status": "error", "message": "Could not connect to the AI service. Check the server's internet connection and try again."}
     except (ValueError, TypeError):
         return {"status": "error", "message": "The AI service returned an unreadable response. Please try again."}
+
+
+def analyze_crop_photo(image_bytes: bytes, media_type: str, crop: str, stage: str, location: str, soil_type: str = "", weather: Optional[dict] = None) -> Dict[str, Any]:
+    """Provide cautious visual triage; this is not a certified disease diagnosis."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {"status": "not_configured", "message": "Crop photo guidance needs the server's OPENAI_API_KEY setting."}
+    data_url = f"data:{media_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    instructions = (
+        "You are a cautious crop-health triage assistant for Indian smallholder farmers. "
+        "Inspect only visible signs and clearly say a photo cannot confirm a diagnosis. "
+        "Structure the answer with: visible observations; possible causes (ranked and uncertain); "
+        "safe immediate checks/actions; general fertilizer/nutrient considerations for the stated stage; "
+        "what to avoid; what additional close-up/photos/details are useful; "
+        "when to contact a local Krishi Vigyan Kendra/agriculture officer. "
+        "Do not invent fertilizer or pesticide dosage, product brands, or chemical mixes. Recommend integrated pest management, "
+        "label-compliant products only after local expert confirmation, and protective equipment. "
+        "Do not claim live weather or location knowledge beyond details supplied. Use simple language and the farmer's context."
+    )
+    weather_context = "No live weather data was available."
+    if weather and weather.get("status") == "success":
+        weather_context = json.dumps({key: weather.get(key) for key in ("temperature", "humidity", "forecast_rainfall_7_day_mm", "weather_observed_at")}, ensure_ascii=False)
+    text = f"Crop: {crop or 'not specified'}. Growth stage: {stage or 'not specified'}. Farm location: {location or 'not specified'}. Reported soil type: {soil_type or 'not specified'}. Current local weather data (not a seasonal forecast): {weather_context}. Please give visual triage and safe next steps."
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra"),
+                "instructions": instructions,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": text},
+                    {"type": "input_image", "image_url": data_url, "detail": "high"},
+                ]}],
+                "max_output_tokens": 800,
+                "store": False,
+            }, timeout=60,
+        )
+        if response.status_code in (401, 403):
+            return {"status": "error", "message": "The OpenAI key is invalid or cannot use the configured model."}
+        if response.status_code == 429:
+            return {"status": "error", "message": "The AI image service is rate-limited or out of API credit."}
+        response.raise_for_status()
+        payload = response.json()
+        answer = payload.get("output_text") or "\n".join(
+            part.get("text", "") for item in payload.get("output", []) if item.get("type") == "message"
+            for part in item.get("content", []) if part.get("type") == "output_text"
+        ).strip()
+        if not answer:
+            return {"status": "error", "message": "The AI returned no guidance for this photo. Try another clear photo."}
+        return {"status": "success", "answer": answer, "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra")}
+    except requests.RequestException:
+        return {"status": "error", "message": "Could not reach the AI image service. Try again when the server is online."}
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "The AI image service returned an unreadable response."}
 
 
 def search_locations(query: str) -> Dict[str, Any]:
@@ -298,3 +355,64 @@ def fetch_live_mandi_rates(crop_name: str, state: str = "Maharashtra") -> Dict[s
         return {"crop": crop_name, "state": state, "data_status": "no_records", "message": f"No recent official market record found for {commodity} in {state}."}
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return {"crop": crop_name, "state": state, "data_status": "unavailable", "message": "The official mandi feed is temporarily unavailable. Try again later."}
+
+
+def fetch_market_comparison(crop_name: str, state: str = "Maharashtra") -> Dict[str, Any]:
+    """Return the latest reported rate per mandi in a state for farmer comparison."""
+    api_key = os.environ.get("DATA_GOV_IN_API_KEY")
+    aliases = {
+        "chickpea": "Gram", "kidneybeans": "Kidney Beans", "pigeonpeas": "Arhar (Tur/Red Gram)",
+        "mungbean": "Moong (Green Gram)", "blackgram": "Urad", "mothbeans": "Moth",
+        "lentil": "Lentil (Masur)", "maize": "Maize", "rice": "Paddy(Dhan)",
+        "cotton": "Cotton", "jute": "Jute", "coffee": "Coffee", "banana": "Banana",
+        "mango": "Mango", "grapes": "Grapes", "orange": "Orange", "coconut": "Coconut",
+        "muskmelon": "Muskmelon", "papaya": "Papaya", "pomegranate": "Pomegranate",
+        "watermelon": "Watermelon", "apple": "Apple",
+    }
+    commodity = aliases.get(crop_name.lower().strip(), crop_name.strip())
+    if not api_key:
+        return {"status": "unavailable", "crop": crop_name, "state": state,
+                "message": "Market comparison needs DATA_GOV_IN_API_KEY on the server."}
+    try:
+        response = requests.get(
+            "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070",
+            params={"api-key": api_key, "format": "json", "limit": 500,
+                   "filters[commodity]": commodity, "filters[state]": state,
+                   "sort[arrival_date]": "desc"}, timeout=12,
+        )
+        response.raise_for_status()
+        records = response.json().get("records", [])
+        latest_by_market = {}
+        for record in records:
+            try:
+                modal = float(record["modal_price"])
+                low, high = float(record["min_price"]), float(record["max_price"])
+                market = record.get("market") or "Unknown market"
+                district = record.get("district") or ""
+                key = (market.casefold(), district.casefold())
+                date_text = str(record.get("arrival_date", ""))
+                parsed_date = None
+                for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                    try:
+                        parsed_date = datetime.strptime(date_text, fmt)
+                        break
+                    except ValueError:
+                        pass
+                sort_date = parsed_date or datetime.min
+                item = {"market": market, "district": district,
+                        "arrival_date": date_text, "min_price_per_quintal": low,
+                        "max_price_per_quintal": high, "modal_price_per_quintal": modal}
+                if key not in latest_by_market or sort_date > latest_by_market[key][0]:
+                    latest_by_market[key] = (sort_date, item)
+            except (ValueError, KeyError, TypeError):
+                continue
+        markets = [item for _, item in latest_by_market.values()]
+        markets.sort(key=lambda item: item["modal_price_per_quintal"], reverse=True)
+        return {"status": "live" if markets else "no_records", "crop": crop_name,
+                "commodity": commodity, "state": state, "markets": markets[:25],
+                "highest_reported": markets[0] if markets else None,
+                "data_source": "AGMARKNET via data.gov.in",
+                "message": "Reported wholesale rates only; these are not confirmed buyer offers."}
+    except (requests.RequestException, ValueError, TypeError):
+        return {"status": "unavailable", "crop": crop_name, "state": state,
+                "message": "The official mandi comparison feed is temporarily unavailable."}

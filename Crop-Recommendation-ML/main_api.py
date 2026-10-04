@@ -18,12 +18,13 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).with_name(".env"))
 
 from database import (
-    AnnualFarmProfile, Farmer, FarmDocument, create_access_token, decode_access_token,
+    AnnualFarmProfile, CommunityPost, Farmer, FarmDocument, PastCropHistory, ProduceListing,
+    create_access_token, decode_access_token,
     get_db, hash_password, verify_password,
 )
 from decision_engine import evaluate_crop_plan
 from external_services import (
-    ask_smartcrop,
+    analyze_crop_photo, ask_smartcrop, fetch_market_comparison,
     fetch_crop_image, fetch_live_mandi_rates, fetch_live_weather, fetch_weather_by_coordinates,
     search_locations,
 )
@@ -47,7 +48,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -136,7 +137,30 @@ class AnnualProfilePayload(SoilClimateData):
     budget: float = Field(..., ge=20000)
     irrigation_source: str = Field(..., min_length=2, max_length=80)
     location: str = Field(..., min_length=2, max_length=160)
+    soil_type: str = Field(default="Unknown", min_length=2, max_length=80)
     seasonal_rainfall_mm: Optional[float] = Field(default=None, ge=0, le=2000)
+
+
+class CropHistoryPayload(BaseModel):
+    crop: str = Field(..., min_length=2, max_length=80)
+    year: int = Field(..., ge=1950, le=2200)
+    season: str = Field(..., min_length=2, max_length=40)
+    area_acres: float = Field(..., gt=0, le=100000)
+    yield_quintals: float = Field(..., ge=0, le=10000000)
+    notes: str = Field(default="", max_length=500)
+
+
+class CommunityPostPayload(BaseModel):
+    message: str = Field(..., min_length=4, max_length=600)
+
+
+class ProduceListingPayload(BaseModel):
+    crop: str = Field(..., min_length=2, max_length=80)
+    quantity_quintals: float = Field(..., gt=0, le=10000000)
+    asking_price_per_quintal: float = Field(..., gt=0)
+    location: str = Field(..., min_length=2, max_length=160)
+    notes: str = Field(default="", max_length=600)
+    share_phone: bool = False
 
 
 def farmer_public(farmer: Farmer) -> dict:
@@ -153,6 +177,7 @@ def profile_public(profile: AnnualFarmProfile) -> dict:
     return {
         "year": profile.year, "acres": profile.acres, "budget": profile.budget,
         "irrigation_source": profile.irrigation_source, "location": profile.location,
+        "soil_type": profile.soil_type,
         "N": profile.n, "P": profile.p, "K": profile.k, "ph": profile.ph,
         "temperature": profile.temperature, "humidity": profile.humidity,
         "rainfall": profile.rainfall, "seasonal_rainfall_mm": profile.seasonal_rainfall_mm,
@@ -295,7 +320,7 @@ def upsert_yearly_profile(
         profile = AnnualFarmProfile(farmer_id=farmer.id, year=payload.year)
         db.add(profile)
     values = payload.model_dump()
-    for key in ("acres", "budget", "irrigation_source", "N", "P", "K", "ph", "temperature", "humidity", "rainfall", "seasonal_rainfall_mm", "location"):
+    for key in ("acres", "budget", "irrigation_source", "N", "P", "K", "ph", "temperature", "humidity", "rainfall", "seasonal_rainfall_mm", "location", "soil_type"):
         value = values[key]
         if key == "seasonal_rainfall_mm" and value is None:
             value = values["rainfall"]
@@ -312,7 +337,7 @@ def recommend_for_farmer(
     db: Session = Depends(get_db),
 ):
     soil = {key: getattr(payload, key) for key in ("N", "P", "K", "temperature", "humidity", "ph", "rainfall")}
-    farm = {key: getattr(payload, key) for key in ("acres", "budget", "irrigation_source", "location")}
+    farm = {key: getattr(payload, key) for key in ("acres", "budget", "irrigation_source", "location", "soil_type")}
     farm["seasonal_rainfall_mm"] = (
         payload.seasonal_rainfall_mm if payload.seasonal_rainfall_mm is not None else payload.rainfall
     )
@@ -437,6 +462,104 @@ def download_farm_document(
     return FileResponse(path, media_type=document.media_type, filename=document.original_name)
 
 
+@app.get("/api/v1/farmer/history")
+def get_crop_history(farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    records = db.query(PastCropHistory).filter(PastCropHistory.farmer_id == farmer.id).order_by(
+        PastCropHistory.year.desc(), PastCropHistory.id.desc(),
+    ).limit(100).all()
+    return {"history": [{"id": row.id, "crop": row.crop, "year": row.year, "season": row.season,
+                         "area_acres": row.area_acres, "yield_quintals": row.yield_quintals,
+                         "notes": row.notes} for row in records]}
+
+
+@app.post("/api/v1/farmer/history")
+def add_crop_history(payload: CropHistoryPayload, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    record = PastCropHistory(farmer_id=farmer.id, **payload.model_dump())
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"success": True, "id": record.id}
+
+
+@app.delete("/api/v1/farmer/history/{record_id}")
+def delete_crop_history(record_id: int, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    record = db.query(PastCropHistory).filter(
+        PastCropHistory.id == record_id, PastCropHistory.farmer_id == farmer.id,
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Crop history entry not found.")
+    db.delete(record)
+    db.commit()
+    return {"success": True}
+
+
+@app.get("/api/v1/community/posts")
+def get_community_posts(_farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    rows = db.query(CommunityPost, Farmer).join(Farmer, Farmer.id == CommunityPost.farmer_id).order_by(
+        CommunityPost.created_at.desc(),
+    ).limit(50).all()
+    return {"posts": [{"id": post.id, "farmer": farmer.full_name, "district": farmer.district,
+                       "state": farmer.state, "message": post.message,
+                       "is_owner": post.farmer_id == _farmer.id,
+                       "created_at": post.created_at.isoformat()} for post, farmer in rows]}
+
+
+@app.post("/api/v1/community/posts")
+def create_community_post(payload: CommunityPostPayload, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    post = CommunityPost(farmer_id=farmer.id, message=payload.message.strip())
+    db.add(post)
+    db.commit()
+    return {"success": True}
+
+
+@app.delete("/api/v1/community/posts/{post_id}")
+def delete_community_post(post_id: int, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    post = db.query(CommunityPost).filter(
+        CommunityPost.id == post_id, CommunityPost.farmer_id == farmer.id,
+    ).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Your community post was not found.")
+    db.delete(post)
+    db.commit()
+    return {"success": True}
+
+
+@app.get("/api/v1/market/listings")
+def get_produce_listings(_farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    rows = db.query(ProduceListing, Farmer).join(Farmer, Farmer.id == ProduceListing.farmer_id).filter(
+        ProduceListing.active == 1,
+    ).order_by(ProduceListing.created_at.desc()).limit(100).all()
+    return {"listings": [{"id": listing.id, "farmer": owner.full_name, "crop": listing.crop,
+                          "quantity_quintals": listing.quantity_quintals,
+                          "asking_price_per_quintal": listing.asking_price_per_quintal,
+                          "location": listing.location, "notes": listing.notes,
+                          "contact_phone": owner.phone_number if listing.share_phone else None,
+                          "is_owner": listing.farmer_id == _farmer.id,
+                          "created_at": listing.created_at.isoformat()} for listing, owner in rows]}
+
+
+@app.post("/api/v1/market/listings")
+def create_produce_listing(payload: ProduceListingPayload, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    values = payload.model_dump()
+    values["share_phone"] = int(values["share_phone"])
+    listing = ProduceListing(farmer_id=farmer.id, **values)
+    db.add(listing)
+    db.commit()
+    return {"success": True}
+
+
+@app.delete("/api/v1/market/listings/{listing_id}")
+def remove_produce_listing(listing_id: int, farmer: Farmer = Depends(get_current_farmer), db: Session = Depends(get_db)):
+    listing = db.query(ProduceListing).filter(
+        ProduceListing.id == listing_id, ProduceListing.farmer_id == farmer.id,
+    ).first()
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Your listing was not found.")
+    listing.active = 0
+    db.commit()
+    return {"success": True}
+
+
 @app.get("/api/v1/services/search-location")
 def search_location(query: str = Query(..., min_length=2, max_length=120)):
     return search_locations(query)
@@ -464,3 +587,44 @@ def get_mandi_rate(
 @app.get("/api/v1/services/crop-image")
 def crop_image(crop: str = Query(..., min_length=2, max_length=80)):
     return fetch_crop_image(crop)
+
+
+@app.get("/api/v1/services/market-comparison")
+def market_comparison(
+    crop: str = Query(..., min_length=2, max_length=80),
+    state: str = Query(default="Maharashtra", min_length=2, max_length=100),
+    farmer: Farmer = Depends(get_current_farmer),
+):
+    return fetch_market_comparison(crop, state)
+
+
+@app.post("/api/v1/services/crop-health")
+async def crop_health_check(
+    image: UploadFile = File(...),
+    crop: str = Form(default="", max_length=80),
+    stage: str = Form(default="", max_length=80),
+    location: str = Form(default="", max_length=160),
+    soil_type: str = Form(default="", max_length=80),
+    farmer: Farmer = Depends(get_current_farmer),
+):
+    allowed = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n", "image/webp": b"RIFF"}
+    media_type = image.content_type or ""
+    signature = allowed.get(media_type)
+    if signature is None:
+        raise HTTPException(status_code=415, detail="Upload a JPG, PNG, or WEBP crop photo.")
+    content = await image.read(8 * 1024 * 1024 + 1)
+    await image.close()
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Crop photos must be under 8 MB.")
+    valid = content.startswith(signature)
+    if media_type == "image/webp":
+        valid = valid and content[8:12] == b"WEBP"
+    if not content or not valid:
+        raise HTTPException(status_code=415, detail="The photo data does not match its image type.")
+    current_weather = fetch_live_weather(location.strip()) if location.strip() else None
+    result = analyze_crop_photo(content, media_type, crop.strip(), stage.strip(), location.strip(), soil_type.strip(), current_weather)
+    if result["status"] == "not_configured":
+        raise HTTPException(status_code=503, detail=result["message"])
+    if result["status"] != "success":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
