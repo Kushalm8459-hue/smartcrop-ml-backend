@@ -565,6 +565,23 @@ def search_location(query: str = Query(..., min_length=2, max_length=120)):
     return search_locations(query)
 
 
+@app.get("/api/v1/services/status")
+def services_status(farmer: Farmer = Depends(get_current_farmer)):
+    """Expose provider readiness without ever returning secret values."""
+    return {
+        "mandi": {
+            "configured": bool(os.environ.get("DATA_GOV_IN_API_KEY")),
+            "provider": "AGMARKNET via data.gov.in",
+            "setup": "Set DATA_GOV_IN_API_KEY in the backend .env or hosting environment.",
+        },
+        "crop_health": {
+            "configured": bool(os.environ.get("OPENAI_API_KEY")),
+            "provider": "OpenAI image analysis",
+            "setup": "Set OPENAI_API_KEY in the backend .env or hosting environment. Image analysis may incur API charges.",
+        },
+    }
+
+
 @app.get("/api/v1/services/weather")
 def get_weather(location: str = "Nashik", latitude: Optional[float] = None, longitude: Optional[float] = None):
     if (latitude is None) != (longitude is None):

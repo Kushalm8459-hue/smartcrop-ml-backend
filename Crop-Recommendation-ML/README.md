@@ -52,7 +52,7 @@ The current crop classifier was trained on a demonstration dataset with N, P, K,
 
 Weather requires an internet connection. Weather and place search use Open-Meteo and require an internet connection. Mandi requests need a data.gov.in API key; when the key, a recent official record or network access is unavailable, the app says so rather than inventing a current quote. A daily mandi record may be delayed. Never commit API keys, the database, or production secrets to Git.
 
-To enable AI chat, copy `.env.example` to `.env`, replace the empty `OPENAI_API_KEY=` value with your own API key, optionally set `OPENAI_MODEL`, and restart Uvicorn. The key stays on the backend and is never sent to the browser. OpenAI API usage may incur charges under your API account. The chatbot uses the OpenAI Responses API and receives only the question, recent chat turns, and the crop report currently displayed.
+To enable AI chat and crop-photo guidance, copy `.env.example` to `.env`, set `OPENAI_API_KEY` to your own OpenAI API key, optionally set `OPENAI_MODEL`, and restart Uvicorn. The key stays on the backend and is never sent to the browser. Image analysis and chat may incur API charges. To enable official mandi prices and market comparison, obtain a data.gov.in API key and set `DATA_GOV_IN_API_KEY`. The Farm services page checks these two provider settings and explains which one needs setup; `/api/v1/services/status` reports readiness without exposing keys. For a hosted deployment, configure the same values as private environment variables in your hosting dashboard. Never commit `.env` or share its key values in chat.
 
 ## GitHub
 
