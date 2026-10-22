@@ -51,58 +51,63 @@ def fetch_crop_image(crop_name: str) -> Dict[str, Any]:
         return {"status": "unavailable", "crop": crop_name}
 
 
-def ask_smartcrop(message: str, history: list, crop_report: Optional[dict] = None) -> Dict[str, Any]:
-    """Ask the OpenAI Responses API for a plain-language, report-aware answer."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return {"status": "not_configured", "message": "Add OPENAI_API_KEY to Crop-Recommendation-ML/.env and restart the server to enable the AI agronomy chat."}
+GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+
+def _gemini_text_response(contents: list, instructions: str, max_output_tokens: int) -> Dict[str, Any]:
+    """Call Gemini's multimodal generateContent API with a server-side key."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    model = os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL).strip()
+    if not api_key:
+        return {"status": "not_configured", "message": "Gemini AI is not configured. Add GEMINI_API_KEY to the backend environment and redeploy."}
+    try:
+        response = requests.post(
+            GEMINI_GENERATE_URL.format(model=model),
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json={
+                "systemInstruction": {"parts": [{"text": instructions}]},
+                "contents": contents,
+                "generationConfig": {"maxOutputTokens": max_output_tokens},
+            }, timeout=60,
+        )
+        if response.status_code in (401, 403):
+            return {"status": "error", "message": "The Gemini API key is invalid or does not have access to this model. Check the key and model in Google AI Studio."}
+        if response.status_code in (400, 404):
+            return {"status": "error", "message": "Gemini rejected the request or model name. Check that GEMINI_MODEL is available to your API key and try again."}
+        if response.status_code == 429:
+            return {"status": "error", "message": "Gemini's free-tier quota or request limit was reached. Check your Google AI Studio limits and try again later."}
+        response.raise_for_status()
+        payload = response.json()
+        candidates = payload.get("candidates") or []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        answer = "\n".join(part.get("text", "") for part in parts if part.get("text")).strip()
+        if not answer:
+            return {"status": "error", "message": "Gemini returned no guidance. Try rephrasing your question or using a clearer crop photo."}
+        return {"status": "success", "answer": answer, "model": model}
+    except requests.RequestException:
+        return {"status": "error", "message": "Could not connect to Gemini. Check the server's internet connection and try again."}
+    except (ValueError, TypeError, KeyError):
+        return {"status": "error", "message": "Gemini returned an unreadable response. Please try again."}
+
+
+def ask_smartcrop(message: str, history: list, crop_report: Optional[dict] = None) -> Dict[str, Any]:
+    """Ask Gemini for a plain-language, report-aware answer."""
     context = "The user is a farmer using SmartCrop, a crop decision-support prototype. Explain terms in simple language and provide practical next steps. Do not claim a model score guarantees crop success, do not invent live weather, market prices, government rules, or local facts. Make clear when estimates need local confirmation. For pesticide, disease, chemical dosage, or high-stakes financial questions, recommend confirmation with a qualified local agriculture officer. Answer in the language the farmer uses."
     if crop_report:
         context += "\n\nCurrent crop report (project estimates, not guarantees):\n" + json.dumps(crop_report, ensure_ascii=False)[:12000]
-
-    conversation = [{"role": item.role, "content": item.content} for item in history[-10:]]
-    conversation.append({"role": "user", "content": message})
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra"),
-                "instructions": context,
-                "input": conversation,
-                "max_output_tokens": 700,
-                "store": False,
-            }, timeout=45,
-        )
-        if response.status_code in (401, 403):
-            return {"status": "error", "message": "The OpenAI API key is invalid or does not have access to this model. Check the server configuration."}
-        if response.status_code == 429:
-            return {"status": "error", "message": "The AI service is rate-limited or out of API credit. Please try again later."}
-        response.raise_for_status()
-        payload = response.json()
-        answer = payload.get("output_text")
-        if not answer:
-            answer = "\n".join(
-                part.get("text", "")
-                for item in payload.get("output", []) if item.get("type") == "message"
-                for part in item.get("content", []) if part.get("type") == "output_text"
-            ).strip()
-        if not answer:
-            return {"status": "error", "message": "The AI service returned an empty response. Please rephrase your question."}
-        return {"status": "success", "answer": answer, "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra")}
-    except requests.RequestException:
-        return {"status": "error", "message": "Could not connect to the AI service. Check the server's internet connection and try again."}
-    except (ValueError, TypeError):
-        return {"status": "error", "message": "The AI service returned an unreadable response. Please try again."}
+    contents = []
+    for item in history[-10:]:
+        role = getattr(item, "role", None)
+        content = getattr(item, "content", None)
+        if role in {"user", "assistant"} and content:
+            contents.append({"role": "user" if role == "user" else "model", "parts": [{"text": content}]})
+    contents.append({"role": "user", "parts": [{"text": message}]})
+    return _gemini_text_response(contents, context, 700)
 
 
 def analyze_crop_photo(image_bytes: bytes, media_type: str, crop: str, stage: str, location: str, soil_type: str = "", weather: Optional[dict] = None) -> Dict[str, Any]:
     """Provide cautious visual triage; this is not a certified disease diagnosis."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return {"status": "not_configured", "message": "Crop photo guidance needs the server's OPENAI_API_KEY setting."}
-    data_url = f"data:{media_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
     instructions = (
         "You are a cautious crop-health triage assistant for Indian smallholder farmers. "
         "Inspect only visible signs and clearly say a photo cannot confirm a diagnosis. "
@@ -118,38 +123,11 @@ def analyze_crop_photo(image_bytes: bytes, media_type: str, crop: str, stage: st
     if weather and weather.get("status") == "success":
         weather_context = json.dumps({key: weather.get(key) for key in ("temperature", "humidity", "forecast_rainfall_7_day_mm", "weather_observed_at")}, ensure_ascii=False)
     text = f"Crop: {crop or 'not specified'}. Growth stage: {stage or 'not specified'}. Farm location: {location or 'not specified'}. Reported soil type: {soil_type or 'not specified'}. Current local weather data (not a seasonal forecast): {weather_context}. Please give visual triage and safe next steps."
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra"),
-                "instructions": instructions,
-                "input": [{"role": "user", "content": [
-                    {"type": "input_text", "text": text},
-                    {"type": "input_image", "image_url": data_url, "detail": "high"},
-                ]}],
-                "max_output_tokens": 800,
-                "store": False,
-            }, timeout=60,
-        )
-        if response.status_code in (401, 403):
-            return {"status": "error", "message": "The OpenAI key is invalid or cannot use the configured model."}
-        if response.status_code == 429:
-            return {"status": "error", "message": "The AI image service is rate-limited or out of API credit."}
-        response.raise_for_status()
-        payload = response.json()
-        answer = payload.get("output_text") or "\n".join(
-            part.get("text", "") for item in payload.get("output", []) if item.get("type") == "message"
-            for part in item.get("content", []) if part.get("type") == "output_text"
-        ).strip()
-        if not answer:
-            return {"status": "error", "message": "The AI returned no guidance for this photo. Try another clear photo."}
-        return {"status": "success", "answer": answer, "model": os.environ.get("OPENAI_MODEL", "gpt-6-astra")}
-    except requests.RequestException:
-        return {"status": "error", "message": "Could not reach the AI image service. Try again when the server is online."}
-    except (ValueError, TypeError):
-        return {"status": "error", "message": "The AI image service returned an unreadable response."}
+    contents = [{"role": "user", "parts": [
+        {"text": text},
+        {"inlineData": {"mimeType": media_type, "data": base64.b64encode(image_bytes).decode("ascii")}},
+    ]}]
+    return _gemini_text_response(contents, instructions, 800)
 
 
 def search_locations(query: str) -> Dict[str, Any]:

@@ -291,7 +291,7 @@ def update_farmer_profile(
 
 @app.get("/api/v1/chat/status")
 def smartcrop_chat_status():
-    return {"configured": bool(os.environ.get("OPENAI_API_KEY")), "provider": "OpenAI Responses API"}
+    return {"configured": bool(os.environ.get("GEMINI_API_KEY")), "provider": "Google Gemini API"}
 
 
 @app.post("/api/v1/chat")
@@ -576,9 +576,9 @@ def services_status(farmer: Farmer = Depends(get_current_farmer)):
             "setup": "Official data.gov.in key not set; SmartCrop will try its keyless public mandi fallback. It has limited state coverage and reported prices can be delayed.",
         },
         "crop_health": {
-            "configured": bool(os.environ.get("OPENAI_API_KEY")),
-            "provider": "OpenAI image analysis",
-            "setup": "Set OPENAI_API_KEY in the backend .env or hosting environment. Image analysis may incur API charges.",
+            "configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "provider": "Google Gemini image analysis",
+            "setup": "Set GEMINI_API_KEY in the backend .env or hosting environment. Gemini free-tier quotas and terms apply.",
         },
     }
 
