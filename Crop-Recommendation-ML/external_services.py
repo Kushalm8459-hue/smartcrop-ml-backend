@@ -230,25 +230,8 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
     using exact GPS coordinates from a map or device location.
     """
     try:
-        # 1. Reverse geocode to get the exact village/taluka/district
-        geo_rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-        headers = {"User-Agent": "SmartCropAI-CollegeProject/1.0"}
-        rev_response = requests.get(geo_rev_url, headers=headers, timeout=8)
-        rev_response.raise_for_status()
-        rev_res = rev_response.json()
-
-        address = rev_res.get("address", {})
-        village = (
-            address.get("village")
-            or address.get("suburb")
-            or address.get("town")
-            or address.get("county", "Local Area")
-        )
-        district = address.get("state_district") or address.get("city", "District")
-        state = address.get("state", "India")
-        location_label = f"{village}, {district}, {state}"
-
-        # 2. Fetch live weather metrics for these exact farm coordinates
+        # Fetch weather first: reverse geocoding is optional and must not make
+        # an otherwise successful weather request appear unavailable.
         weather_url = (
             f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
             f"&current=temperature_2m,relative_humidity_2m,precipitation"
@@ -262,6 +245,30 @@ def fetch_weather_by_coordinates(lat: float, lon: float) -> Dict[str, Any]:
         temperature = current.get("temperature_2m", 27.0)
         humidity = current.get("relative_humidity_2m", 65.0)
         forecast_rainfall = weather_res.get("daily", {}).get("precipitation_sum", [])
+
+        location_label = f"Coordinates ({lat:.4f}, {lon:.4f})"
+        district = ""
+        state = "India"
+        try:
+            geo_rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+            headers = {"User-Agent": "SmartCropAI-CollegeProject/1.0"}
+            rev_response = requests.get(geo_rev_url, headers=headers, timeout=4)
+            rev_response.raise_for_status()
+            address = rev_response.json().get("address", {})
+            village = (
+                address.get("village")
+                or address.get("suburb")
+                or address.get("town")
+                or address.get("county")
+                or address.get("city")
+            )
+            district = address.get("state_district") or address.get("city", "")
+            state = address.get("state", "India")
+            if village:
+                location_label = ", ".join(part for part in (village, district, state) if part)
+        except (requests.RequestException, ValueError, TypeError):
+            # Open-Meteo still provides valid weather for the supplied point.
+            pass
 
         return {
             "status": "success",
