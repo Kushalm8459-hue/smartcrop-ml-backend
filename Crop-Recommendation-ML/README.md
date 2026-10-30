@@ -1,5 +1,9 @@
 # SmartCrop AI
 
+## Spring Boot backend integration
+
+This project includes a small Java/Spring Boot backend in [`springboot/`](springboot/README.md). The existing frontend sends crop recommendation requests through Spring Boot, which forwards them to the existing FastAPI and ML backend. Run FastAPI on port 8000 and Spring Boot on port 8081 as described in the integration guide.
+
 A local college-project prototype for farmer accounts, saved farm profiles, a trained crop suitability model, rule-based crop planning, local weather, and official daily mandi records when configured.
 
 ## Start locally on Windows
@@ -18,6 +22,8 @@ python -m uvicorn main_api:app --reload
 ```
 
 Open <http://127.0.0.1:8000/> for the farmer app and <http://127.0.0.1:8000/docs> for the API reference. The app serves the API and frontend from one origin. SQLite creates `smartcrop.db` beside the backend files.
+
+For the Spring Boot practical flow, keep this Python server running and start the Java service in a second PowerShell window from `springboot` with `mvn spring-boot:run`. The Java service runs at `http://127.0.0.1:8081`; the app page stays at `http://127.0.0.1:8000/`.
 
 Farmer accounts and farm records persist in the configured database. Local development uses this SQLite file. For deployment, set `SMARTCROP_DATABASE_URL` (or the hosting provider's `DATABASE_URL`) to a managed PostgreSQL database, or mount persistent storage and set `SMARTCROP_DATA_DIR` to its path. Keep `SMARTCROP_SECRET_KEY` stable between deploys so current sessions remain valid. A GitHub push by itself cannot provide durable server storage; the host must provide the database or persistent disk.
 
