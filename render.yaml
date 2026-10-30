@@ -1,20 +1,5 @@
 services:
   - type: web
-    name: smartcrop-ml-api-kushalm8459
-    runtime: python
-    plan: free
-    rootDir: Crop-Recommendation-ML
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main_api:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/health
-    autoDeploy: true
-    envVars:
-      - key: SMARTCROP_SECRET_KEY
-        generateValue: true
-      - key: SMARTCROP_SPRING_API_URL
-        value: https://smartcrop-springboot-api-kushalm8459.onrender.com
-
-  - type: web
     name: smartcrop-springboot-api-kushalm8459
     runtime: docker
     plan: free
@@ -24,6 +9,6 @@ services:
     autoDeploy: true
     envVars:
       - key: SMARTCROP_PYTHON_API_URL
-        value: https://smartcrop-ml-api-kushalm8459.onrender.com
+        value: https://smartcrop-ml-backend.onrender.com
       - key: SMARTCROP_FRONTEND_ORIGIN
-        value: https://smartcrop-ml-api-kushalm8459.onrender.com
+        value: https://smartcrop-ml-backend.onrender.com

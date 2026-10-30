@@ -48,7 +48,7 @@ The recommendation request carries a Bearer token from the signed-in farmer. Spr
 
 ## Deploy to Render
 
-The repository-root `render.yaml` defines two free web services: the Python FastAPI app and the Java Spring Boot app. The Java service builds from `Dockerfile`. The Blueprint connects the frontend to the Spring URL and configures Java to call the Python service. Push `render.yaml` to GitHub, then create a Blueprint in Render from this repository's `main` branch.
+The repository-root `render.yaml` defines the Java Spring Boot web service. It calls the existing Python service at `https://smartcrop-ml-backend.onrender.com`, so the Blueprint will not create a duplicate Python service. Create a Blueprint in Render from this repository's `main` branch and deploy the Java service. Then set `SMARTCROP_SPRING_API_URL` on the existing Python service to the deployed Java service URL and let that service redeploy. The frontend will then route crop recommendations through Spring Boot.
 
 This demo Blueprint uses SQLite and Render's ephemeral service filesystem to avoid creating a paid database or persistent disk. Free services can spin down when idle, and local files can be lost on spin-down, restart, or redeploy. Treat farmer accounts, farm reports, and uploads on the public demo as temporary test data; this configuration is for an exam demo, not production persistence. Render documents these free-service limits in its [free instance guide](https://render.com/docs/free).
 
