@@ -46,6 +46,12 @@ The recommendation request carries a Bearer token from the signed-in farmer. Spr
 
 `pom.xml` declares Spring Web and Validation. `application.properties` sets the Java server to port 8081 and the Python API base URL to `http://127.0.0.1:8000`. Change `smartcrop.python-api-url` if FastAPI runs at a different address.
 
+## Deploy to Render
+
+The repository-root `render.yaml` defines two free web services: the Python FastAPI app and the Java Spring Boot app. The Java service builds from `Dockerfile`. The Blueprint connects the frontend to the Spring URL and configures Java to call the Python service. Push `render.yaml` to GitHub, then create a Blueprint in Render from this repository's `main` branch.
+
+This demo Blueprint uses SQLite and Render's ephemeral service filesystem to avoid creating a paid database or persistent disk. Free services can spin down when idle, and local files can be lost on spin-down, restart, or redeploy. Treat farmer accounts, farm reports, and uploads on the public demo as temporary test data; this configuration is for an exam demo, not production persistence. Render documents these free-service limits in its [free instance guide](https://render.com/docs/free).
+
 ## Viva explanation
 
 > “The existing SmartCrop frontend sends the recommendation request to my Spring Boot REST controller. The controller validates the JSON request and passes it to a service that uses Spring's RestClient to call the existing FastAPI backend. Spring forwards the signed-in farmer's Bearer token. FastAPI runs the scikit-learn model and existing crop planning logic, saves the profile, and returns JSON. Spring Boot passes that response back to the browser. This lets the project demonstrate Java Spring Boot and Python ML together without duplicating or retraining the model.”

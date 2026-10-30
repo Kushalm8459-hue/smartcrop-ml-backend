@@ -225,6 +225,13 @@ def health_check():
     return {"status": "online", "service": "SmartCrop AI Decision Support Engine", "version": app.version}
 
 
+@app.get("/api/config")
+def frontend_config():
+    """Expose the configured Spring Boot URL to the existing browser app."""
+    spring_api_url = os.getenv("SMARTCROP_SPRING_API_URL", "http://127.0.0.1:8081").rstrip("/")
+    return {"spring_api_url": spring_api_url}
+
+
 @app.post("/api/v1/recommend")
 def get_recommendation(payload: DirectRecommendationRequest):
     soil, farm = payload.soil_climate.model_dump(), payload.farm_profile.model_dump()

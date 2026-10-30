@@ -4,6 +4,8 @@
 
 This project includes a small Java/Spring Boot backend in [`springboot/`](springboot/README.md). The existing frontend sends crop recommendation requests through Spring Boot, which forwards them to the existing FastAPI and ML backend. Run FastAPI on port 8000 and Spring Boot on port 8081 as described in the integration guide.
 
+The repository also includes a Render Blueprint at the repository root. See the Spring Boot guide for its two-service setup and free-demo storage limitations.
+
 A local college-project prototype for farmer accounts, saved farm profiles, a trained crop suitability model, rule-based crop planning, local weather, and official daily mandi records when configured.
 
 ## Start locally on Windows
